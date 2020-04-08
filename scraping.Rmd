@@ -1,0 +1,325 @@
+---
+title: "1, scraper"
+output: html_document
+---
+# Підготовка до роботиt
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+install.packages('rvest')    # install 'rvest' library in R; library and package are synonyms
+install.packages('tidyverse')
+install.packages("progress")
+```
+
+```{r setup, include=FALSE}
+library(rvest)    # a library for web web scraping
+library(tidyverse)
+library(progress)
+```
+
+# Скрейпинг
+## Cheatsheets
+
+About HTML: https://www.w3schools.com/html/default.asp
+CSS-selectors: https://www.w3schools.com/cssref/css_selectors.asp
+
+### Tidyverse code: piping
+
+`data %>% function1() %>% function2()` - is a **pipe**  
+`data` — is our data structure, most often a *DataFrame*  
+`function1`, `function1` — are functions, applied to data. The order of them matters!  
+
+1. `data %>% function1()` - `data` is transformed by `function1`.  
+2. `data %>% function1() %>% function2()` — data, transformed by `function1`, e.g. the result of `function1`, goes to `function2`.  
+
+The same can be written as:
+`data_after_f1 <- function1(data)`  
+`data_after_f2 <- function1(data_after_f1)` — much less elegant and clear code, but does the same.  
+
+**You can stack as much functions in pipe as you want!**  
+
+## Let's code!
+```{r}
+url <- "https://ms.detector.media/type/4/?fbclid=IwAR2wylW95gPXcyH2V2U3R_igsRCPYABZFsK2cLaLMDdfKd5cv04eXGCBBAM/"
+content <- read_html(url)
+content
+```
+
+1. Знайдемо потрібні елементи на сторінці (клік правою кнопкою миші на елементі => "Перевірити"(або "Inspect")б щось подібне), ctrl+shift+c на сторінці.
+![find element](1_find-element.png)
+
+Спробуємо вибрати рядки з таблиці
+```{r}
+content %>%
+  html_nodes("div.cat_blkList") %>%
+  html_text()
+
+# <div class="cat_blkList> "
+```
+Поки не дуже гарно, весь зміст рядка "злипся", інформація не структурована так, як ми хочемо.  
+
+Виберемо лише заголовки та дати, використаємо для цього CSS-селектори за допомогою атрибутів.
+```{r}
+titles <- content %>%
+  html_nodes('div.cat_blkPost [data-column="Title"]') %>%
+  html_text() %>%
+  str_trim()
+
+dates <- content %>%
+  html_nodes('div.cat_blkPost [data-column="Date"]') %>%
+  html_text() %>%
+  str_trim()
+
+dates
+```
+Селектор `'div.disinfo-db-post [data-column="Title"]'` означає: вибрати всі елементи, у яких атрибут `data-column` дорівнює `Title`, і які знаходяться всередині елемента `div` з класом `disinfo-db-post`, це визначено через пробіл у селекторі. Ми тут трохи ускладнили з практичного, зробивши ієрархічний селектор.
+
+Супер, маємо дані! Пора зробити з них таблицю — `data.frame` — і зберегти її. 
+```{r}
+df <- data.frame(titles = titles, date = dates)
+# синтаксис: data.frame(назва_колонки = назва_вектора_значень, ще_одна_колонка=…)
+
+write.csv("ms.detector.media_30_pages.csv", row.names = FALSE)    # записали дані в форматі .csv
+# Файл з даними буде у тій же папці, де збережено ноутбук
+```
+
+Спробуйте відкрити файл у текстовому редакторі (Блокнот тощо, хороший на віндоус Notepad++, для маків та лінуксів Sublime Text, чи в самому RStudio).
+CSV — рядки відділені новими лініями, значення комірок розділені комами:
+```
+"","titles","date"
+"1","The COVID-19 outbreak is a pretext to gain control of the world’s population","25.03.2020"
+"2","Swedish oligarchs impede the introduction of quarantine measures","24.03.2020"
+```
+(вище просто текстовий чанк, він не виконається як код, але виділиться візуально)
+
+Як прочитати csv
+```{r}
+read.csv("https://github.com/juli2345/julia_zahorodna/ms.detector.media_30_pages.csv")
+```
+
+
+## Зациклюємо. Скачаємо те саме для кожної сторінки
+Адреса сайту  виглядає так: https://ms.detector.media/type/4/?fbclid=IwAR2wylW95gPXcyH2V2U3R_igsRCPYABZFsK2cLaLMDdfKd5cv04eXGCBBAM/pagenum/30/  
+`offset=20` це друга сторінка, у третьої оффсет буде 30, у одинадцятої 110 і так далі.
+Отже щоб завантажити дані з однієї сторінки потрібно:
+1. Завантажити її html, підставляючи по ходу цикла різні офсети
+2. Вибрати потрібні нам дані з відповідних елементів (як ми вибрали дати та заголовки з першої сторінки)
+3. Зберегти дані
+
+```{r}
+npages <- 30    # скільки сторінок скрейпити
+
+pb <- progress_bar$new(
+  format = "  downloading [:bar] :percent in :elapsed ",
+  total = npages + 1, clear = FALSE, width= 60)
+# скопіювала з довідки про progress_bar, змінено лише параметр total
+
+# Вектори, у яких будемо зберігати значення
+dates <- c()
+titles <- c()
+links <- c()
+
+url_template <- "https://ms.detector.media/type/4/?fbclid=IwAR2wylW95gPXcyH2V2U3R_igsRCPYABZFsK2cLaLMDdfKd5cv04eXGCBBAM/pagenum/"
+```
+
+
+Візьмемо перші 50 сторінок. Всередині цикла те саме, що ми робили з першою сторінкою
+```{r}
+for (page in 1:npages) {
+  # з'єднуємо рядки: основу url-адреси, № сторінки помножений на 10, бо сторінки йдуть з кроком 10
+  url <- str_c(url_template,
+               page * 10)
+  
+  content <- read_html(url)
+  
+  # Копіпаст коду для першої сторінки
+  titles <- content %>%
+    html_nodes('div.page_cats-post [data-column="Title"]') %>%
+    html_text() %>%
+    str_trim() %>%
+    c(titles, .)    
+  
+  dates <- content %>%
+    html_nodes('div.page_cats-post [data-column="Date"]') %>%
+    html_text() %>%
+    str_trim()  %>%
+    c(dates, .)
+  
+  # ще додамо лінки. Тут вибираємо не текст, а атрибут "href" тега "<a>" — лінк
+  links <- content %>%
+    html_nodes('div.page_cats-post [data-column="Title"] a') %>%
+    html_attr("href") %>%
+    c(links, .)
+  
+  # Ще один важливий крок: затримка між запитами, щоб не зробити DDoS-атаку на сайт
+  Sys.sleep(3)    # 2 секунди програма буде "спати" 
+  
+  # Оновимо прогрес-бар. Це для комфорту, щоб бачити, скільки ще лишилось сторінок
+  # pb$tick()
+}
+```
+
+Перевіримо, вектори мають мати довжиноу 500 при офсеті 50. Далі робимо з них датафрейм і зберігаємо його
+```{r}
+stopifnot(length(dates) == (npages + 1) * 10 &
+          length(titles) == (npages + 1) * 10 &
+          length(links) == (npages + 1) * 10) 
+stopifnot(TRUE)
+
+# Якщо довжина кожного з векторів не 500, нам виб'є помилку. Ми просимо R через `stopifnot` вважати помилкою, якщо в результаті скрейпінгу у нас не збігається кільність елементів у колонках.
+
+# датафрейм через пайп одразу йде на зберігання
+data.frame(title = titles,
+           date = dates,
+           link = links) %>%
+  write.csv("https://ms.detector.media_30_pages.csv",
+            row.names = FALSE) # щоб не зберігати непотрібну колонку номерів рядків
+```
+
+Прочитаємо датафрейм, який щойно зберегли:
+```{r}
+df <- read.csv("https://github.com/juli2345/julia_zahorodna/ms.detector.media_30_pages.csv")
+df
+```
+Відскрейпили.
+
+## Далі спроби зробити щось з цими даними. Чернетка для наступного заняття.
+
+```{r}
+# install.packages("lubridate")
+library(lubridate)
+
+search_str <- "covid.?19|coronavirus|sars.?cov.?2|pandemic|epidemic"
+
+df <- df %>%
+  mutate(covid19 = str_detect(str_to_lower(title), search_str),
+         date = dmy(as.character(date)))
+```
+- `mutate` — створити в дата-фреймі нову колонку з певними значеннями  
+- `dmy` — функція з бібліотеки `lubridate` щоб перетворбвати рядки з датами на формат даних дату  
+- `str_detect` — функція з бібліотеки `stringr` щоб перевірити, чи рядок містить якесь слово або [регулярний вираз](https://stringr.tidyverse.org/articles/regular-expressions.html)  
+- `str_to_lower` — функція з бібліотеки `stringr`, яка робить всі літери малими.
+
+```{r}
+df <- df %>% 
+  filter(date > "2020-01-20") %>%
+  arrange(date)
+
+df
+```
+Фільтрування даних — відібрати лише ті рядки, де значення відповідають заданим критеріям  
+`arrange` — сортування  
+
+### Проста візуалізація
+
+```{r}
+ggplot(df, aes(x = date, fill = covid19)) +
+  geom_dotplot(binwidth = 1, color = NA)
+```
+
+
+
+
+```{r}
+ggplot(filter(df, date > "2020-01-20"), aes(date, fill = covid19)) + 
+  geom_dotplot(color = NA, binwidth = 1, dotsize = 0.75, stackgroups = TRUE, method = "histodot") +
+  labs(title = "Кількість дезінформаційних новин", caption = "Дані: euvsdisinfo.eu") + 
+  theme_light() +
+  theme(panel.border = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        plot.margin = margin(24, 24, 24, 16))
+```
+
+### З'єднання даних: якщо дві таблиці мають спільну колонку, наприклад, дату чи ім'я й прізвище, то можна з'єднати ці дані по рядкам. 
+
+```{r}
+covid_df <- url("https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_confirmed_global.csv&filename=time_series_covid19_confirmed_global.csv") %>%
+  read.csv()
+covid_df
+```
+
+#### "Довгий":) і "широкий":( формати даних
+У широкому форматі даних значення змінної чомусь стають назвами колонок. Чисті дані мають змінні я колонки, а спостереження рядками. В R можна легко перетворити широкий формат на довгий. https://tidyr.tidyverse.org/reference/pivot_longer.html
+```{r}
+colnames(covid_df)[1:10]
+
+covid_df <- covid_df %>%
+  pivot_longer(cols = -c(Country.Region, Province.State, Lat, Long),
+               #які колонки залишимо
+               names_to = "date",
+               # як назвати колонку зі старими назвами "широких" колонок
+               names_prefix = "X",
+               # чи є якийсь зайвий символ перед назвами колонок
+               values_to = "cases"
+               # як назвати колонку зі значеннями у старих "широких" колонках
+               ) %>%    # "косметичні операції"
+  mutate(date = mdy(date)) %>%
+  # перетворимо дату-рядок на дату
+  select(-c(Lat, Long)) %>%
+  # приберемо зайві колонки
+  rename(region = Province.State, country = Country.Region)
+  # перейменуємо колонки
+
+covid_df
+```
+
+#### Групування
+Підсумувати дані за певними колонками. Наприклад, ми можемо подивитись кількість випадків у світі всього — за колонкою дати. Або позбавитись колонки регіону й згрупувати кількість підтверджених випадків за датами й країнами.
+
+```{r}
+covid_df <- covid_df %>%
+  group_by(country, date) %>%
+  summarise(cases = sum(cases))
+
+world_covid = covid_df %>%
+  group_by(date) %>%
+  summarise(cases = sum(cases))
+```
+
+Просто подивимось, може скінчиться карантин?
+```{r}
+require(scales)
+world_covid
+
+ggplot(world_covid, aes(date, cases)) + 
+  geom_line(color = "magenta", size = 0.8) + 
+  scale_y_log10(labels = comma) +
+  # label = comma щоб не було 1е+05 замість числа
+  theme_minimal() + 
+  ggtitle("COVID-19 у світі, логарифмічна шкала")
+```
+### Згрупуємо кількість випадків дезінформації про коронавірус за днями
+```{r}
+df_cov_daily <- df %>%
+  filter(covid19 == TRUE) %>%
+  group_by(date) %>%
+  summarise(disinfo_cases = n())
+
+df_cov_daily
+```
+
+З'єднаємо згадки вірусу в дезінформації з динамікою його поширення
+
+```{r}
+df_joined <- df_cov_daily %>%
+  left_join(world_covid, by = "date") %>%
+  filter(!is.na(cases))
+
+df_joined
+```
+
+Кількість випадків коронавірусу наведено кумулятивно, тобто сума за день і всі попередні. Визначимо, скільки нових випадків фіксували щодня:
+```{r}
+df_joined$cases_by_day <- df_joined$cases %>%
+  diff() %>%
+  c(df_joined$cases[1], .)
+```
+
+Намалюємо це:
+```{r}
+ggplot(df_joined, aes(date, cases_by_day, size = disinfo_cases)) +
+  geom_jitter(shape = 21, color = "#49006a",
+              fill = "#7a017780", stroke = 0.8) + 
+  theme_minimal()
+```
+
